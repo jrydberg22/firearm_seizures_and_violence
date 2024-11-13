@@ -1,5 +1,6 @@
-#### Examining The Effect of Firearm Seizures During Directed Patrol on Firearm Violence
-#### Manuscript Analysis Replication Script
+#### Using Bayesian Mixed Effect Generalized Linear Models to Evaluate Criminological Interventions: 
+#### An Application to Firearm Seizures during Directed Patrol
+#### Final Data Preparation and Modeling
 
 #### Setup Workspace ####
 
@@ -8,16 +9,17 @@
 library(tidyverse)
 library(brms)
 library(marginaleffects)
+library(tidybayes)
 
 # Working Directory
 
-setwd(FILEPATH)
+setwd("YOUR FILEPATH HERE")
 
 #### Read in Data ####
 
-d = read_csv("Firearm Seizures Replication Data.csv")
+load("Flint Firearm Seizures Analysis Data.rds")
 
-#### Setup for Post-Intervention Data ####
+#### Setup for Post-Intervention ####
 
 d = d %>%
   mutate(block_id = GEOID10,
@@ -81,7 +83,7 @@ desc_stats(d_post$cfs_domestic)
 desc_stats(d_post$rto_total_gun)
 desc_stats(d_post$rto_cfs_shotsfired)
 
-# Intervention Area Specific Measures
+# Firearm Seizures
 htspt = d_post %>%
   distinct(intv_area, time, tx, gun_seizures, traffic_sqmi) 
 
@@ -92,7 +94,6 @@ htspt %>%
   summarize(total = sum(gun_seizures),
             mean = mean(gun_seizures))
 
-# Checks on Firearm Seizures in Final Quarter
 htspt %>%
   filter(time > 21) %>%
   group_by(intv_area) %>%
@@ -115,142 +116,9 @@ desc_stats(blocks$n.black)
 desc_stats(blocks$n.hispanic)
 desc_stats(blocks$n.male1521)
 
-#### Fake Data Simulation ####
+#### Determinining Likelihood ####
 
-library(MASS)
-
-# Set seed for reproducibility
-set.seed(123)
-
-# Define number of neighborhoods and census blocks
-n_neighborhoods = 10
-n_blocks = 3000
-
-# Define number of months and create a sequence
-n_months = 24
-months = 1:n_months
-
-# Create neighborhood-level data
-neighborhoods = tibble(
-  neighborhood_id = 1:n_neighborhoods) %>%
-  tidyr::expand(neighborhood_id, month = months) %>%
-  mutate(firearms_seized = rnbinom(n = n(), mu = 1, size = 0.1))
-
-# Create block-level data
-blocks = tibble(
-  block_id = 1:n_blocks,
-  neighborhood_id = sample(1:n_neighborhoods, size = n_blocks, replace = TRUE),
-  block_population = rnorm(n_blocks, 34, 44),
-  fem_hh = rnorm(n_blocks, 4, 7)
-)
-
-# Create monthly crime data for each block
-crime = blocks %>%
-  tidyr::expand(block_id, month = months) %>%
-  left_join(blocks, by = "block_id") %>%
-  left_join(neighborhoods) %>%
-  mutate(crimes = rnbinom(n = n(), mu = 1 + (0.25*firearms_seized), size = 0.01))
-
-# Preview the data
-head(crime)
-
-rm(blocks, neighborhoods, months, n_blocks, n_months, n_neighborhoods)
-
-### Modeling Fake Data
-
-crime = crime %>%
-  group_by(neighborhood_id) %>%
-  mutate(fs_between = mean(firearms_seized)) %>%
-  ungroup() %>%
-  mutate(fs_within = firearms_seized - fs_between,
-         monthZ = robustHD::standardize(month),
-         popZ = robustHD::standardize(block_population),
-         femhhZ = robustHD::standardize(fem_hh),
-         obs_id = 1:nrow(crime))
-
-# Negative Binomial
-
-f1 = brm(crimes ~ monthZ + fs_within + fs_between + popZ + 
-           (1 + monthZ | neighborhood_id) + (1 + monthZ | block_id),
-         data = crime,
-         family = negbinomial(),
-         prior = c(prior(normal(0, 1), class = Intercept),
-                   prior(normal(0, 0.5), class = b),
-                   prior(exponential(0.02), class = shape),
-                   prior(exponential(2), class = sd),
-                   prior(lkj(4), class = cor)),
-         cores = parallel::detectCores(),
-         chains = 4, iter = 2000, warmup = 1000, threads = threading(2),
-         control = list(adapt_delta = 0.99,
-                        max_treedepth = 15),
-         save_pars = save_pars(),
-         backend = "cmdstanr",
-         file = "fake data sim - negbin",
-         file_refit = "on_change")
-
-print(f1, digits = 3)
-
-# Zero-Inflated RE Poisson
-
-f2 = brm(bf(crimes ~ monthZ + fs_within + fs_between + popZ + 
-              (1 + monthZ | neighborhood_id) + (1 + monthZ | block_id),
-            zi ~ 1 + (1 | neighborhood_id) + (1 | block_id)),
-         data = crime,
-         family = zero_inflated_poisson(),
-         prior = c(prior(normal(0, 1), class = Intercept),
-                   prior(normal(0, 0.5), class = b),
-                   prior(exponential(2), class = sd),
-                   prior(lkj(4), class = cor),
-                   prior(logistic(0, 1), class = Intercept, dpar = zi),
-                   prior(exponential(2), class = sd, dpar = zi)),
-         cores = parallel::detectCores(),
-         chains = 4, iter = 2000, warmup = 1000,
-         save_pars = save_pars(),
-         backend = "cmdstanr",
-         file = "fake data sim - zi poisson",
-         file_refit = "on_change")
-
-print(f2, digits = 3)
-
-(waic_nb = waic(f1))
-(waic_zip = waic(f2))
-
-loo_compare(waic_nb, waic_zip)
-
-# Compare
-
-(loo_nb = loo(f1))
-(loo_orep = loo(f2))
-
-loo_compare(loo_nb, loo_orep)
-
-# Zero Inflated Negbin
-
-f3 = brm(bf(crimes ~ monthZ + fs_within + fs_between + popZ + 
-              (1 + monthZ | neighborhood_id) + (1 + monthZ | block_id),
-            zi ~ 1 + (1 | neighborhood_id) + (1 | block_id)),
-         data = crime,
-         family = zero_inflated_negbinomial(),
-         prior = c(prior(normal(0, 1), class = Intercept),
-                   prior(normal(0, 0.5), class = b),
-                   prior(exponential(2), class = sd),
-                   prior(exponential(0.02), class = shape),
-                   prior(lkj(4), class = cor),
-                   prior(logistic(0, 1), class = Intercept, dpar = zi),
-                   prior(exponential(2), class = sd, dpar = zi)),
-         cores = parallel::detectCores(),
-         chains = 4, iter = 2000, warmup = 1000, threads = 2,
-         save_pars = save_pars(),
-         backend = "cmdstanr",
-         file = "fake data sim - zi negbin",
-         file_refit = "on_change")
-
-(waic_nb = waic(f1))
-(waic_zinb = waic(f3))
-
-loo_compare(waic_nb, waic_zinb)
-
-#### Prior Predictive Simulation ####
+## Compute gun seizure variables, standardize time and controls
 
 d_post = d_post %>%
   group_by(intv_area) %>%
@@ -267,328 +135,756 @@ d_post = d_post %>%
          ml1521Z = robustHD::standardize(n.male1521),
          obs_id = 1:nrow(d_post))
 
-prior = c(prior(exponential(0.02), class = shape),
-          prior(normal(0, 1), class = Intercept),
-          prior(normal(0, 0.1), class = b),
-          prior(exponential(2), class = sd),
-          prior(lkj(4), class = cor))
+## Gaussian
 
-p1 = brm(total_gun ~ timeZ + fs_within + fs_between + tx + traffic_sqmiZ + 
-           t.popZ + femhhZ + vacantZ + blackZ + hispanicZ + ml1521Z + 
-           (1 + timeZ | intv_area) + (1 + timeZ | block_id),
+prior = c(prior(normal(0, 5), class = Intercept),
+          prior(normal(0, 0.5), class = b),
+          prior(exponential(1), class = sd),
+          prior(exponential(1), class = sigma))
+
+lik1_gauss = brm(total_gun ~ timeZ + fs_within + fs_between + tx + traffic_sqmiZ + 
+                   t.popZ + femhhZ + vacantZ + blackZ + hispanicZ + ml1521Z + 
+                   (1 | intv_area) + (1 | block_id),
+                 data = d_post,
+                 family = gaussian(link = "identity"),
+                 prior = prior,
+                 cores = parallel::detectCores(),
+                 chains = 4, iter = 2000, warmup = 1000, threads = 2,
+                 seed = 739033,
+                 file = "gun violence - gauss lik",
+                 file_refit = "on_change",
+                 backend = "rstan")
+
+lik1_gauss = add_criterion(lik1_gauss, "waic")
+
+## Poisson
+
+prior = c(prior(normal(0, 5), class = Intercept),
+          prior(normal(0, 0.5), class = b),
+          prior(exponential(1), class = sd))
+
+lik2_pois = brm(total_gun ~ timeZ + fs_within + fs_between + tx + traffic_sqmiZ + 
+                  t.popZ + femhhZ + vacantZ + blackZ + hispanicZ + ml1521Z + 
+                  (1 | intv_area) + (1 | block_id),
+                data = d_post,
+                family = poisson(link = "log"),
+                prior = prior,
+                cores = parallel::detectCores(),
+                chains = 4, iter = 2000, warmup = 1000, threads = 2,
+                seed = 965336,
+                file = "gun violence - pois lik",
+                file_refit = "on_change",
+                backend = "rstan")
+
+lik2_pois = add_criterion(lik2_pois, "waic")
+
+## Negative Binomial
+
+prior = c(prior(exponential(1), class = shape),
+          prior(normal(0, 5), class = Intercept),
+          prior(normal(0, 0.5), class = b),
+          prior(exponential(1), class = sd))
+
+lik3_nb = brm(total_gun ~ timeZ + fs_within + fs_between + tx + traffic_sqmiZ + 
+                t.popZ + femhhZ + vacantZ + blackZ + hispanicZ + ml1521Z + 
+                (1 | intv_area) + (1 | block_id),
+              data = d_post,
+              family = negbinomial(link = "log"),
+              prior = prior,
+              cores = parallel::detectCores(),
+              chains = 4, iter = 2000, warmup = 1000, threads = 2,
+              seed = 318176,
+              file = "gun violence - nb lik",
+              file_refit = "on_change",
+              backend = "rstan")
+
+lik3_nb = add_criterion(lik3_nb, "waic")
+
+## ZI Poisson
+
+prior = c(prior(normal(0, 5), class = Intercept),
+          prior(normal(0, 0.5), class = b),
+          prior(exponential(1), class = sd),
+          prior(logistic(0, 1), class = Intercept, dpar = zi),
+          prior(exponential(1), class = sd, dpar = zi))
+
+lik4_zip = brm(bf(total_gun ~ timeZ + fs_within + fs_between + tx + traffic_sqmiZ + 
+                    t.popZ + femhhZ + vacantZ + blackZ + hispanicZ + ml1521Z + 
+                    (1 | intv_area) + (1 | block_id),
+                  zi ~ 1 + (1 | intv_area) + (1 | block_id)),
+                 data = d_post,
+                 family = zero_inflated_poisson(),
+                 prior = prior,
+                 cores = parallel::detectCores(),
+                 chains = 4, iter = 2000, warmup = 1000, threads = 2,
+                 seed = 182372,
+                 file = "gun violence - zip lik",
+                 file_refit = "on_change",
+                 backend = "rstan")
+
+lik4_zip = add_criterion(lik4_zip, "waic")
+
+## ZI Negative Binomial
+
+prior = c(prior(normal(0, 5), class = Intercept),
+          prior(normal(0, 0.5), class = b),
+          prior(exponential(1), class = sd),
+          prior(exponential(1), class = shape),
+          prior(logistic(0, 1), class = Intercept, dpar = zi),
+          prior(exponential(1), class = sd, dpar = zi))
+
+lik5_zinb = brm(bf(total_gun ~ timeZ + fs_within + fs_between + tx + traffic_sqmiZ + 
+                     t.popZ + femhhZ + vacantZ + blackZ + hispanicZ + ml1521Z + 
+                     (1 | intv_area) + (1 | block_id),
+                   zi ~ 1 + (1 | intv_area) + (1 | block_id)),
+               data = d_post,
+               family = zero_inflated_negbinomial(),
+               prior = prior,
+               cores = parallel::detectCores(),
+               chains = 4, iter = 2000, warmup = 1000, threads = 2,
+               seed = 855090,
+               file = "gun violence - zinb lik",
+               file_refit = "on_change",
+               backend = "rstan")
+
+lik5_zinb = add_criterion(lik5_zinb, "waic")
+
+# Print WAIC Statistics
+
+waic(lik1_gauss)
+waic(lik2_pois)
+waic(lik3_nb)
+waic(lik4_zip)
+waic(lik5_zinb)
+
+# Initial comparison including Gaussian
+
+loo_compare(lik1_gauss,
+            lik2_pois,
+            lik3_nb,
+            lik4_zip,
+            lik5_zinb, criterion = "waic")
+
+# Subsequent comparison excluding Gaussian (right column, Table 2)
+
+loo_compare(lik2_pois,
+            lik3_nb,
+            lik4_zip,
+            lik5_zinb, criterion = "waic")
+
+## Gaussian
+
+prior = c(prior(normal(0, 5), class = Intercept),
+          prior(normal(0, 0.5), class = b),
+          prior(exponential(1), class = sd),
+          prior(exponential(1), class = sigma))
+
+lik1_gauss = brm(cfs_shotsfired ~ timeZ + fs_within + fs_between + tx + traffic_sqmiZ + 
+                   t.popZ + femhhZ + vacantZ + blackZ + hispanicZ + ml1521Z + 
+                   (1 | intv_area) + (1 | block_id),
+                 data = d_post,
+                 family = gaussian(link = "identity"),
+                 prior = prior,
+                 cores = parallel::detectCores(),
+                 chains = 4, iter = 2000, warmup = 1000, threads = 2,
+                 seed = 205531,
+                 file = "model fits/cfs - gauss lik",
+                 file_refit = "on_change",
+                 backend = "cmdstanr")
+
+lik1_gauss = add_criterion(lik1_gauss, "waic")
+lik1_gauss = read_rds("model fits/gun violence - gauss lik.rds")
+
+## Poisson
+
+prior = c(prior(normal(0, 5), class = Intercept),
+          prior(normal(0, 0.5), class = b),
+          prior(exponential(1), class = sd))
+
+lik2_pois = brm(cfs_shotsfired ~ timeZ + fs_within + fs_between + tx + traffic_sqmiZ + 
+                  t.popZ + femhhZ + vacantZ + blackZ + hispanicZ + ml1521Z + 
+                  (1 | intv_area) + (1 | block_id),
+                data = d_post,
+                family = poisson(link = "log"),
+                prior = prior,
+                cores = parallel::detectCores(),
+                chains = 4, iter = 2000, warmup = 1000, threads = 2,
+                seed = 426568,
+                file = "model fits/cfs - pois lik",
+                file_refit = "on_change",
+                backend = "cmdstanr")
+
+lik2_pois = add_criterion(lik2_pois, "waic")
+
+## Negative Binomial
+
+prior = c(prior(exponential(1), class = shape),
+          prior(normal(0, 5), class = Intercept),
+          prior(normal(0, 0.5), class = b),
+          prior(exponential(1), class = sd))
+
+lik3_nb = brm(cfs_shotsfired ~ timeZ + fs_within + fs_between + tx + traffic_sqmiZ + 
+                t.popZ + femhhZ + vacantZ + blackZ + hispanicZ + ml1521Z + 
+                (1 | intv_area) + (1 | block_id),
+              data = d_post,
+              family = negbinomial(link = "log"),
+              prior = prior,
+              cores = parallel::detectCores(),
+              chains = 4, iter = 2000, warmup = 1000, threads = 2,
+              seed = 586148,
+              file = "model fits/cfs - nb lik",
+              file_refit = "on_change",
+              backend = "cmdstanr")
+
+lik3_nb = add_criterion(lik3_nb, "waic")
+
+## ZI Poisson
+
+prior = c(prior(normal(0, 5), class = Intercept),
+          prior(normal(0, 0.5), class = b),
+          prior(exponential(1), class = sd),
+          prior(logistic(0, 1), class = Intercept, dpar = zi),
+          prior(exponential(1), class = sd, dpar = zi))
+
+lik4_zip = brm(bf(cfs_shotsfired ~ timeZ + fs_within + fs_between + tx + traffic_sqmiZ + 
+                    t.popZ + femhhZ + vacantZ + blackZ + hispanicZ + ml1521Z + 
+                    (1 | intv_area) + (1 | block_id),
+                  zi ~ 1 + (1 | intv_area) + (1 | block_id)),
+               data = d_post,
+               family = zero_inflated_poisson(),
+               prior = prior,
+               cores = parallel::detectCores(),
+               chains = 4, iter = 2000, warmup = 1000, threads = 2,
+               seed = 728361,
+               file = "model fits/cfs - zip lik",
+               file_refit = "on_change",
+               backend = "cmdstanr")
+
+lik4_zip = add_criterion(lik4_zip, "waic")
+
+## ZI Negative Binomial
+
+prior = c(prior(normal(0, 5), class = Intercept),
+          prior(normal(0, 0.5), class = b),
+          prior(exponential(1), class = sd),
+          prior(exponential(1), class = shape),
+          prior(logistic(0, 1), class = Intercept, dpar = zi),
+          prior(exponential(1), class = sd, dpar = zi))
+
+lik5_zinb = brm(bf(cfs_shotsfired ~ timeZ + fs_within + fs_between + tx + traffic_sqmiZ + 
+                     t.popZ + femhhZ + vacantZ + blackZ + hispanicZ + ml1521Z + 
+                     (1 | intv_area) + (1 | block_id),
+                   zi ~ 1 + (1 | intv_area) + (1 | block_id)),
+                data = d_post,
+                family = zero_inflated_negbinomial(),
+                prior = prior,
+                cores = parallel::detectCores(),
+                chains = 4, iter = 2000, warmup = 1000, threads = 2,
+                seed = 840339,
+                file = "model fits/cfs - zinb lik",
+                file_refit = "on_change",
+                backend = "cmdstanr")
+
+lik5_zinb = add_criterion(lik5_zinb, "waic")
+
+waic(lik1_gauss)
+waic(lik2_pois)
+waic(lik3_nb)
+waic(lik4_zip)
+waic(lik5_zinb)
+
+loo_compare(lik1_gauss,
+            lik2_pois,
+            lik3_nb,
+            lik4_zip,
+            lik5_zinb, criterion = "waic")
+
+loo_compare(lik2_pois,
+            lik3_nb,
+            lik4_zip,
+            lik5_zinb, criterion = "waic")
+
+### Posterior Predictive Model Comparison - What is happening with Gaussian likelihood?
+
+library(bayesplot)
+
+# Identify outcome vector, using gun violence for this check
+
+gv = d_post$total_gun
+
+# 100 Posterior draws from each model
+
+gv_rep_gaus = posterior_predict(lik1_gauss, draws = 100)
+gv_rep_pois = posterior_predict(lik2_pois, draws = 100)
+gv_rep_nb = posterior_predict(lik3_nb, draws = 100)
+gv_rep_zip = posterior_predict(lik4_zip, draws = 100)
+gv_rep_zinb = posterior_predict(lik5_zinb, draws = 100)
+
+# Function for identifying proportions of zeros
+
+prop_zero = function(x) mean(x == 0)
+
+prop_zero(gv) # 98%
+
+## Apply stat function to posterior draws
+
+# Proportion of zeroes
+
+gvgaus_zero = ppc_stat(gv, gv_rep_gaus, stat = "prop_zero") 
+gvpois_zero = ppc_stat(gv, gv_rep_pois, stat = "prop_zero")
+gvnb_zero = ppc_stat(gv, gv_rep_nb, stat = "prop_zero")
+gvzip_zero = ppc_stat(gv, gv_rep_zip, stat = "prop_zero")
+gvzinb_zero = ppc_stat(gv, gv_rep_zinb, stat = "prop_zero")
+
+# Maximum value
+
+gvgaus_max = ppc_stat(gv, gv_rep_gaus, stat = "max")
+gvpois_max = ppc_stat(gv, gv_rep_pois, stat = "max")
+gvnb_max = ppc_stat(gv, gv_rep_nb, stat = "max")
+gvzip_max = ppc_stat(gv, gv_rep_zip, stat = "max")
+gvzinb_max = ppc_stat(gv, gv_rep_zinb, stat = "max")
+
+# Visualize a subset (just 3 for convenience, could do all 5 but that's a busy graph)
+
+gv_ppc = tibble(
+  stat = c(rep(c("Proportion of Zeros"), times = 4000*3),
+           rep(c("Maximum Value"), times = 4000*3)) %>%
+    factor(levels = c("Proportion of Zeros", "Maximum Value")),
+  likelihood = c(rep(c("Gaussian", "Poisson", "Zero-Inflated\nNegative Binomial"),
+                     each = 4000),
+                 rep(c("Gaussian", "Poisson", "Zero-Inflated\nNegative Binomial"),
+                     each = 4000)),
+  value = c(gvgaus_zero$data$value,
+            gvpois_zero$data$value,
+            gvzinb_zero$data$value,
+            gvgaus_max$data$value,
+            gvpois_max$data$value,
+            gvzinb_max$data$value),
+  actual = c(rep(prop_zero(gv), times = 4000*3),
+             rep(max(gv), times = 4000*3))
+)
+
+gv_ppc %>%
+  ggplot(aes(x = value)) +
+  geom_histogram(color = "white", fill = "deepskyblue") +
+  geom_vline(aes(xintercept = actual), linetype = 1, 
+             color = "black", size = 1.25, alpha = 0.5) +
+  facet_wrap(vars(stat, likelihood), nrow = 2,
+             scales = "free") +
+  labs(x = "Posterior Summary Statistic",
+       y = "Number of Posterior Draws") +
+  scale_x_continuous(n.breaks = 4) +
+  theme_classic() +
+  theme(text = element_text(family = "serif", size = 12),
+        strip.text = element_text(face = "bold"))
+
+ggsave("Posterior Predictive.png", width = 6.5, height = 5, units = "in")
+
+#### Prior Predictive Simulation ####
+
+### Initial set of priors
+
+prior = c(prior(normal(0, 5), class = Intercept),
+          prior(normal(0, 1), class = b),
+          prior(exponential(1), class = sd),
+          prior(exponential(1), class = shape),
+          prior(lkj(1), class = cor),
+          prior(logistic(0, 1), class = Intercept, dpar = zi),
+          prior(exponential(1), class = sd, dpar = zi))
+
+p1 = brm(bf(total_gun ~ timeZ + fs_within + fs_between + tx + traffic_sqmiZ + 
+              t.popZ + femhhZ + vacantZ + blackZ + hispanicZ + ml1521Z + 
+              (1 + timeZ | intv_area) + (1 + timeZ | block_id),
+            zi ~ 1 + (1 | intv_area) + (1 | block_id)),
          data = d_post,
-         family = negbinomial(link = "log"),
+         family = zero_inflated_negbinomial(),
          prior = prior,
          cores = parallel::detectCores(),
          chains = 4, iter = 2000, warmup = 1000, threads = 2,
-         seed = 483313,
+         seed = 965336,
+         backend = "rstan",
+         sample_prior = "only") # Turning this option on ensures *only* the prior is used
+
+# Export predictions
+
+p1d = p1 %>%
+  sjPlot::get_model_data(type = "pred", terms = "timeZ")
+
+p1d %>%
+  ggplot(aes(x = x, y = predicted)) +
+  geom_lineribbon(aes(ymin = conf.low, ymax = conf.high),
+                  fill = "deepskyblue") +
+  labs(x = "Time (Standardized)",
+       y = "Predicted Gun Violence Incidents") +
+  theme_classic() +
+  theme(text = element_text(color = "black", family = "serif"),
+        axis.text = element_text(color = "black", size = 10),
+        axis.title = element_text(size = 12),
+        aspect.ratio = 1)
+
+# Left panel of Figure 2
+
+ggsave("Prior Predictive - Initial.png", 
+       width = 3.25, height = 3.25, units = "in")
+
+### Tuned Prior - made adjustments parameter class by parameter class
+
+prior = c(prior(normal(0, 1), class = Intercept),
+          prior(normal(0, 0.1), class = b),
+          prior(exponential(2), class = sd),
+          prior(exponential(0.02), class = shape),
+          prior(lkj(4), class = cor),
+          prior(logistic(0, 1), class = Intercept, dpar = zi),
+          prior(exponential(2), class = sd, dpar = zi))
+
+p2 = brm(bf(total_gun ~ timeZ + fs_within + fs_between + tx + traffic_sqmiZ + 
+              t.popZ + femhhZ + vacantZ + blackZ + hispanicZ + ml1521Z + 
+              (1 + timeZ | intv_area) + (1 + timeZ | block_id),
+            zi ~ 1 + (1 | intv_area) + (1 | block_id)),
+         data = d_post,
+         family = zero_inflated_negbinomial(),
+         prior = prior,
+         cores = parallel::detectCores(),
+         chains = 4, iter = 2000, warmup = 1000, threads = 2,
+         seed = 693325,
          backend = "cmdstanr",
          sample_prior = "only")
 
-p1 %>%
-  sjPlot::plot_model(type = "pred", terms = "fs_within") +
-  theme_classic()
+p2d = p2 %>%
+  sjPlot::get_model_data(type = "pred", terms = "timeZ")
 
-rm(p1)
+p2d %>%
+  ggplot(aes(x = x, y = predicted)) +
+  geom_lineribbon(aes(ymin = conf.low, ymax = conf.high),
+                  fill = "deepskyblue") +
+  labs(x = "Time (Standardized)",
+       y = "Predicted Gun Violence Incidents") +
+  theme_classic() +
+  theme(text = element_text(color = "black", family = "serif"),
+        axis.text = element_text(color = "black", size = 10),
+        axis.title = element_text(size = 12),
+        aspect.ratio = 1)
+
+# Right panel of Figure 2
+
+ggsave("Prior Predictive - Tuned.png", 
+       width = 3.25, height = 3.25, units = "in")
 
 #### Functional Form of Time ####
 
-# Gun Violence
+## Gun Violence
 
-linear = brm(total_gun ~ timeZ +  
+linear = brm(bf(total_gun ~ timeZ +  
                (1 | intv_area) + (1 | block_id),
+               zi ~ 1 + (1 | intv_area) + (1 | block_id)),
              data = d_post,
-             family = negbinomial(link = "log"),
-             prior = c(prior(exponential(0.02), class = shape),
-                       prior(normal(0, 1), class = Intercept),
+             family = zero_inflated_negbinomial(),
+             prior = c(prior(normal(0, 1), class = Intercept),
                        prior(normal(0, 0.1), class = b),
-                       prior(exponential(2), class = sd)),
+                       prior(exponential(2), class = sd),
+                       prior(exponential(0.02), class = shape),
+                       prior(logistic(0, 1), class = Intercept, dpar = zi),
+                       prior(exponential(2), class = sd, dpar = zi)),
              cores = parallel::detectCores(),
              chains = 4, iter = 2000, warmup = 1000, threads = 2,
              control = list(adapt_delta = 0.99,
                             max_treedepth = 15),
              seed = 299583,
-             backend = "cmdstanr")
+             file = "gvff - zinb lin",
+             file_refit = "on_change",
+             backend = "rstan")
 
-quad = brm(total_gun ~ timeZ + I(timeZ^2) + 
-             (1 | intv_area) + (1 | block_id),
+linear = add_criterion(linear, "waic")
+
+quad = brm(bf(total_gun ~ timeZ + I(timeZ^2) +
+                (1 | intv_area) + (1 | block_id),
+              zi ~ 1 + (1 | intv_area) + (1 | block_id)),
            data = d_post,
-           family = negbinomial(link = "log"),
-           prior = c(prior(exponential(0.02), class = shape),
-                     prior(normal(0, 1), class = Intercept),
+           family = zero_inflated_negbinomial(),
+           prior = c(prior(normal(0, 1), class = Intercept),
                      prior(normal(0, 0.1), class = b),
-                     prior(exponential(2), class = sd)),
+                     prior(exponential(2), class = sd),
+                     prior(exponential(0.02), class = shape),
+                     prior(logistic(0, 1), class = Intercept, dpar = zi),
+                     prior(exponential(2), class = sd, dpar = zi)),
            cores = parallel::detectCores(),
            chains = 4, iter = 2000, warmup = 1000, threads = 2,
            control = list(adapt_delta = 0.99,
                           max_treedepth = 15),
            seed = 596692,
-           backend = "cmdstanr")
+           file = "gvff - zinb quad",
+           file_refit = "on_change",
+           backend = "rstan")
 
-lin_random = brm(total_gun ~ timeZ +  
-                   (1 + timeZ | intv_area) + (1 + timeZ | block_id),
+quad = add_criterion(quad, "waic")
+
+lin_random = brm(bf(total_gun ~ timeZ +  
+                      (1 + timeZ | intv_area) + (1 + timeZ | block_id),
+                    zi ~ 1 + (1 | intv_area) + (1 | block_id)),
                  data = d_post,
-                 family = negbinomial(link = "log"),
-                 prior = c(prior(exponential(0.02), class = shape),
-                           prior(normal(0, 1), class = Intercept),
+                 family = zero_inflated_negbinomial(),
+                 prior = c(prior(normal(0, 1), class = Intercept),
                            prior(normal(0, 0.1), class = b),
                            prior(exponential(2), class = sd),
-                           prior(lkj(4), class = cor)),
+                           prior(exponential(0.02), class = shape),
+                           prior(lkj(4), class = cor),
+                           prior(logistic(0, 1), class = Intercept, dpar = zi),
+                           prior(exponential(2), class = sd, dpar = zi)),
                  cores = parallel::detectCores(),
                  chains = 4, iter = 2000, warmup = 1000, threads = 2,
                  control = list(adapt_delta = 0.99,
                                 max_treedepth = 15),
                  seed = 181351,
-                 backend = "cmdstanr")
+                 file = "gvff - zinb linran",
+                 file_refit = "on_change",
+                 backend = "rstan")
 
-quad_random = brm(total_gun ~ timeZ + I(timeZ^2) + 
+lin_random = add_criterion(lin_random, "waic")
+
+quad_random = brm(bf(total_gun ~ timeZ + I(timeZ^2) + 
                     (1 + timeZ + I(timeZ^2) | intv_area) + (1 + timeZ + I(timeZ^2) | block_id),
+                    zi ~ 1 + (1 | intv_area) + (1 | block_id)),
                   data = d_post,
-                  family = negbinomial(link = "log"),
-                  prior = c(prior(exponential(0.02), class = shape),
-                            prior(normal(0, 1), class = Intercept),
+                  family = zero_inflated_negbinomial(),
+                  prior = c(prior(normal(0, 1), class = Intercept),
                             prior(normal(0, 0.1), class = b),
                             prior(exponential(2), class = sd),
-                            prior(lkj(4), class = cor)),
+                            prior(exponential(0.02), class = shape),
+                            prior(lkj(4), class = cor),
+                            prior(logistic(0, 1), class = Intercept, dpar = zi),
+                            prior(exponential(2), class = sd, dpar = zi)),
                   cores = parallel::detectCores(),
                   chains = 4, iter = 2000, warmup = 1000, threads = 2,
                   control = list(adapt_delta = 0.99,
                                  max_treedepth = 15),
                   seed = 407013,
-                  backend = "cmdstanr")
+                  file = "gvff - zinb quadran",
+                  file_refit = "on_change",
+                  backend = "rstan")
 
-# Compare
+quad_random = add_criterion(quad_random, "waic")
 
-(waic_linear = waic(ear))
-(waic_quad = waic(quad))
-(waic_linran = waic(lin_random))
-(waic_linrwquad = waic(lin_random_wquad))
-(waic_quadran = waic(quad_random))
+# Compare (Left column, Table 4)
 
-loo_compare(waic_linear, waic_quad, waic_linran, waic_quadran)
+loo_compare(linear, 
+            quad, 
+            lin_random,
+            quad_random, 
+            criterion = "waic")
 
-# Shots fired
+## Shots fired
 
-linear = brm(cfs_shotsfired ~ timeZ +  
-               (1 | intv_area) + (1 | block_id),
+linear = brm(bf(cfs_shotsfired ~ timeZ +  
+                  (1 | intv_area) + (1 | block_id),
+                zi ~ 1 + (1 | intv_area) + (1 | block_id)),
              data = d_post,
-             family = negbinomial(link = "log"),
-             prior = c(prior(exponential(0.02), class = shape),
-                       prior(normal(0, 1), class = Intercept),
+             family = zero_inflated_negbinomial(),
+             prior = c(prior(normal(0, 1), class = Intercept),
                        prior(normal(0, 0.1), class = b),
-                       prior(exponential(2), class = sd)),
+                       prior(exponential(2), class = sd),
+                       prior(exponential(0.02), class = shape),
+                       prior(logistic(0, 1), class = Intercept, dpar = zi),
+                       prior(exponential(2), class = sd, dpar = zi)),
              cores = parallel::detectCores(),
              chains = 4, iter = 2000, warmup = 1000, threads = 2,
              control = list(adapt_delta = 0.99,
                             max_treedepth = 15),
-             seed = 718990,
-             backend = "cmdstanr")
+             seed = 551258,
+             file = "model fits/sfff - zinb lin",
+             file_refit = "on_change",
+             backend = "rstan")
 
-quad = brm(cfs_shotsfired ~ timeZ + I(timeZ^2) + 
-             (1 | intv_area) + (1 | block_id),
+linear = add_criterion(linear, "waic")
+
+quad = brm(bf(cfs_shotsfired ~ timeZ + I(timeZ^2) +
+                (1 | intv_area) + (1 | block_id),
+              zi ~ 1 + (1 | intv_area) + (1 | block_id)),
            data = d_post,
-           family = negbinomial(link = "log"),
-           prior = c(prior(exponential(0.02), class = shape),
-                     prior(normal(0, 1), class = Intercept),
+           family = zero_inflated_negbinomial(),
+           prior = c(prior(normal(0, 1), class = Intercept),
                      prior(normal(0, 0.1), class = b),
-                     prior(exponential(2), class = sd)),
+                     prior(exponential(2), class = sd),
+                     prior(exponential(0.02), class = shape),
+                     prior(logistic(0, 1), class = Intercept, dpar = zi),
+                     prior(exponential(2), class = sd, dpar = zi)),
            cores = parallel::detectCores(),
            chains = 4, iter = 2000, warmup = 1000, threads = 2,
            control = list(adapt_delta = 0.99,
                           max_treedepth = 15),
-           seed = 488371,
-           backend = "cmdstanr")
+           seed = 950067,
+           file = "sfff - zinb quad",
+           file_refit = "on_change",
+           backend = "rstan")
 
-lin_random = brm(cfs_shotsfired ~ timeZ +  
-                   (1 + timeZ | intv_area) + (1 + timeZ | block_id),
+quad = add_criterion(quad, "waic")
+
+lin_random = brm(bf(cfs_shotsfired ~ timeZ +  
+                      (1 + timeZ | intv_area) + (1 + timeZ | block_id),
+                    zi ~ 1 + (1 | intv_area) + (1 | block_id)),
                  data = d_post,
-                 family = negbinomial(link = "log"),
-                 prior = c(prior(exponential(0.02), class = shape),
-                           prior(normal(0, 1), class = Intercept),
+                 family = zero_inflated_negbinomial(),
+                 prior = c(prior(normal(0, 1), class = Intercept),
                            prior(normal(0, 0.1), class = b),
                            prior(exponential(2), class = sd),
-                           prior(lkj(4), class = cor)),
+                           prior(exponential(0.02), class = shape),
+                           prior(lkj(4), class = cor),
+                           prior(logistic(0, 1), class = Intercept, dpar = zi),
+                           prior(exponential(2), class = sd, dpar = zi)),
                  cores = parallel::detectCores(),
                  chains = 4, iter = 2000, warmup = 1000, threads = 2,
                  control = list(adapt_delta = 0.99,
                                 max_treedepth = 15),
-                 seed = 160420,
-                 backend = "cmdstanr")
+                 seed = 776398,
+                 file = "sfff - zinb linran",
+                 file_refit = "on_change",
+                 backend = "rstan")
 
-quad_random = brm(cfs_shotsfired ~ timeZ + I(timeZ^2) + 
-                    (1 + timeZ + I(timeZ^2) | intv_area) + (1 + timeZ + I(timeZ^2) | block_id),
+lin_random = add_criterion(lin_random, "waic")
+
+quad_random = brm(bf(cfs_shotsfired ~ timeZ + I(timeZ^2) + 
+                       (1 + timeZ + I(timeZ^2) | intv_area) + (1 + timeZ + I(timeZ^2) | block_id),
+                     zi ~ 1 + (1 | intv_area) + (1 | block_id)),
                   data = d_post,
-                  family = negbinomial(link = "log"),
-                  prior = c(prior(exponential(0.02), class = shape),
-                            prior(normal(0, 1), class = Intercept),
+                  family = zero_inflated_negbinomial(),
+                  prior = c(prior(normal(0, 1), class = Intercept),
                             prior(normal(0, 0.1), class = b),
                             prior(exponential(2), class = sd),
-                            prior(lkj(4), class = cor)),
+                            prior(exponential(0.02), class = shape),
+                            prior(lkj(4), class = cor),
+                            prior(logistic(0, 1), class = Intercept, dpar = zi),
+                            prior(exponential(2), class = sd, dpar = zi)),
                   cores = parallel::detectCores(),
                   chains = 4, iter = 2000, warmup = 1000, threads = 2,
                   control = list(adapt_delta = 0.99,
                                  max_treedepth = 15),
-                  seed = 799866,
-                  backend = "cmdstanr")
+                  seed = 574706,
+                  file = "sfff - zinb quadran",
+                  file_refit = "on_change",
+                  backend = "rstan")
 
-# Compare
-# Table 3 Statistics
+quad_random = add_criterion(quad_random, "waic")
 
-(waic_linear = waic(linear))
-(waic_quad = waic(quad))
-(waic_linran = waic(lin_random))
-(waic_quadran = waic(quad_random))
+# Compare (Right column, Table 4)
 
-loo_compare(waic_linear, waic_quad, waic_linran, waic_quadran)
+loo_compare(linear, 
+            quad, 
+            lin_random, 
+            quad_random, 
+            criterion = "waic")
 
 #### Modeling for Inference ####
 
-# Table 4 Models
-# Gun Violence
+## Gun Violence
 
-gv_fit = brm(total_gun ~ 
+gv_fit = brm(bf(total_gun ~ 
                timeZ + I(timeZ^2) + fs_between + fs_within +
                tx + traffic_sqmiZ + t.popZ + femhhZ + vacantZ + blackZ + hispanicZ + ml1521Z +
                (1 + timeZ + I(timeZ^2) | intv_area) + (1 + timeZ + I(timeZ^2) | block_id),
+               zi ~ 1 + (1 | intv_area) + (1 | block_id)),
              data = d_post,
-             family = negbinomial(link = "log"),
-             prior = c(prior(exponential(0.02), class = shape),
-                       prior(normal(0, 1), class = Intercept),
+             family = zero_inflated_negbinomial(),
+             prior = c(prior(normal(0, 1), class = Intercept),
                        prior(normal(0, 0.1), class = b),
                        prior(exponential(2), class = sd),
-                       prior(lkj(4), class = cor)),
+                       prior(exponential(0.02), class = shape),
+                       prior(lkj(4), class = cor),
+                       prior(logistic(0, 1), class = Intercept, dpar = zi),
+                       prior(exponential(2), class = sd, dpar = zi)),
              cores = parallel::detectCores(),
              chains = 4, iter = 4000, warmup = 1000, threads = 2,
              control = list(adapt_delta = 0.99,
                             max_treedepth = 15),
              seed = 111992,
-             file = "model fits/gun violence fit",
+             file = "zi gun violence fit",
              file_refit = "on_change",
-             backend = "cmdstanr")
+             backend = "rstan")
 
-#gv_fit = read_rds("model fits/gun violence fit.rds")
+# Gun Violence Posterior Summaries - Table 5
 
-print(gv_fit, digits = 3)
+print(gv_fit, digits = 3) 
 
-# Calls for Service - Shots Fired
+## Calls for Service - Shots Fired
 
-sf_fit = brm(cfs_shotsfired ~ 
-               timeZ + I(timeZ^2) + fs_between + fs_within +
-               tx + traffic_sqmiZ + t.popZ + femhhZ + vacantZ + blackZ + hispanicZ + ml1521Z +
-               (1 + timeZ + I(timeZ^2) | intv_area) + (1 + timeZ + I(timeZ^2) | block_id),
-             data = na.omit(d_post),
-             family = negbinomial(link = "log"),
-             prior = c(prior(exponential(0.02), class = shape),
-                       prior(normal(0, 1), class = Intercept),
-                       prior(normal(0, 0.1), class = b),
-                       prior(exponential(2), class = sd),
-                       prior(lkj(4), class = cor)),
-             cores = parallel::detectCores(),
-             chains = 4, iter = 4000, warmup = 1000, threads = 2,
-             control = list(adapt_delta = 0.99,
-                            max_treedepth = 15),
-             seed = 95069,
-             file = "model fits/shots fired fit",
-             file_refit = "on_change",
-             backend = "cmdstanr")
-
-print(sf_fit, digits = 3)
-
-### Alternate Dependent Variables
-
-ngv_fit = brm(total_nongun ~ 
-               timeZ + I(timeZ^2) + fs_between + fs_within +
-               tx + traffic_sqmiZ + t.popZ + femhhZ + vacantZ + blackZ + hispanicZ + ml1521Z +
-               (1 + timeZ + I(timeZ^2) | intv_area) + (1 + timeZ + I(timeZ^2) | block_id),
-             data = d_post,
-             family = negbinomial(link = "log"),
-             prior = c(prior(exponential(0.02), class = shape),
-                       prior(normal(0, 1), class = Intercept),
-                       prior(normal(0, 0.1), class = b),
-                       prior(exponential(2), class = sd),
-                       prior(lkj(4), class = cor)),
-             cores = parallel::detectCores(),
-             chains = 4, iter = 4000, warmup = 1000, threads = 2,
-             control = list(adapt_delta = 0.99,
-                            max_treedepth = 15),
-             seed = 965336,
-             file = "model fits/alt dv - non gun violence fit",
-             file_refit = "on_change",
-             backend = "cmdstanr")
-
-#ngv_fit = read_rds("model fits/alt dv - non gun violence fit.rds")
-
-print(ngv_fit, digits = 3)
-
-dcfs_fit = brm(cfs_domestic ~ 
-                 timeZ + I(timeZ^2) + fs_between + fs_within +
-                 tx + traffic_sqmiZ + t.popZ + femhhZ + vacantZ + blackZ + hispanicZ + ml1521Z +
-                 (1 + timeZ + I(timeZ^2) | intv_area) + (1 + timeZ + I(timeZ^2) | block_id),
-               data = na.omit(d_post),
-               family = negbinomial(link = "log"),
-               prior = c(prior(exponential(0.02), class = shape),
-                         prior(normal(0, 1), class = Intercept),
-                         prior(normal(0, 0.1), class = b),
-                         prior(exponential(2), class = sd),
-                         prior(lkj(4), class = cor)),
-               cores = parallel::detectCores(),
-               chains = 4, iter = 4000, warmup = 1000, threads = 2,
-               control = list(adapt_delta = 0.99,
-                              max_treedepth = 15),
-               seed = 547622,
-               file = "model fits/alt dv - domestic calls fit",
-               file_refit = "on_change",
-               backend = "cmdstanr")
-
-print(dcfs_fit, digits = 3)
-
-# Reverse Time Order - Gun Violence
-
-rtogv_fit = brm(rto_total_gun ~ 
+sf_fit = brm(bf(cfs_shotsfired ~ 
                   timeZ + I(timeZ^2) + fs_between + fs_within +
                   tx + traffic_sqmiZ + t.popZ + femhhZ + vacantZ + blackZ + hispanicZ + ml1521Z +
                   (1 + timeZ + I(timeZ^2) | intv_area) + (1 + timeZ + I(timeZ^2) | block_id),
-                data = d_post,
-                family = negbinomial(link = "log"),
-                prior = c(prior(exponential(0.02), class = shape),
-                          prior(normal(0, 1), class = Intercept),
-                          prior(normal(0, 0.1), class = b),
-                          prior(exponential(2), class = sd),
-                          prior(lkj(4), class = cor)),
-                cores = parallel::detectCores(),
-                chains = 4, iter = 4000, warmup = 1000, threads = 2,
-                control = list(adapt_delta = 0.99,
-                               max_treedepth = 15),
-                seed = 493006,
-                file = "model fits/rto - gun violence fit",
-                file_refit = "on_change",
-                backend = "cmdstanr")
+                zi ~ 1 + (1 | intv_area) + (1 | block_id)),
+             data = d_post,
+             family = zero_inflated_negbinomial(),
+             prior = c(prior(normal(0, 1), class = Intercept),
+                       prior(normal(0, 0.1), class = b),
+                       prior(exponential(2), class = sd),
+                       prior(exponential(0.02), class = shape),
+                       prior(lkj(4), class = cor),
+                       prior(logistic(0, 1), class = Intercept, dpar = zi),
+                       prior(exponential(2), class = sd, dpar = zi)),
+             cores = parallel::detectCores(),
+             chains = 8, iter = 2500, warmup = 1000, threads = 2,
+             control = list(adapt_delta = 0.99,
+                            max_treedepth = 15),
+             seed = 95069,
+             file = "zi shots fired fit",
+             file_refit = "on_change",
+             backend = "rstan")
 
-print(rtogv_fit, digits = 3)
+# Shots Fired Posterior Summaries - Table 5
 
-rtocfs_fit = brm(rto_cfs_shotsfired ~ 
+print(sf_fit, digits = 3)
+
+#### Robustness Checks
+
+### Alternate Dependent Variable
+
+ngv_fit = brm(bf(total_nongun ~ 
+                  timeZ + I(timeZ^2) + fs_between + fs_within +
+                  tx + traffic_sqmiZ + t.popZ + femhhZ + vacantZ + blackZ + hispanicZ + ml1521Z +
+                  (1 + timeZ + I(timeZ^2) | intv_area) + (1 + timeZ + I(timeZ^2) | block_id),
+                zi ~ 1 + (1 | intv_area) + (1 | block_id)),
+             data = d_post,
+             family = zero_inflated_negbinomial(),
+             prior = c(prior(normal(0, 1), class = Intercept),
+                       prior(normal(0, 0.1), class = b),
+                       prior(exponential(2), class = sd),
+                       prior(exponential(0.02), class = shape),
+                       prior(lkj(4), class = cor),
+                       prior(logistic(0, 1), class = Intercept, dpar = zi),
+                       prior(exponential(2), class = sd, dpar = zi)),
+             cores = parallel::detectCores(),
+             chains = 4, iter = 4000, warmup = 1000, threads = 2,
+             control = list(adapt_delta = 0.99,
+                            max_treedepth = 15),
+             seed = 593170,
+             file = "zi alt dv - gun violence fit",
+             file_refit = "on_change",
+             backend = "rstan")
+
+# Reverse Time Order
+
+rtogv_fit = brm(bf(rto_total_gun ~ 
                    timeZ + I(timeZ^2) + fs_between + fs_within +
                    tx + traffic_sqmiZ + t.popZ + femhhZ + vacantZ + blackZ + hispanicZ + ml1521Z +
                    (1 + timeZ + I(timeZ^2) | intv_area) + (1 + timeZ + I(timeZ^2) | block_id),
-                 data = na.omit(d_post),
-                 family = negbinomial(link = "log"),
-                 prior = c(prior(exponential(0.02), class = shape),
-                           prior(normal(0, 1), class = Intercept),
-                           prior(normal(0, 0.1), class = b),
-                           prior(exponential(2), class = sd),
-                           prior(lkj(4), class = cor)),
-                 cores = parallel::detectCores(),
-                 chains = 4, iter = 4000, warmup = 1000, threads = 2,
-                 control = list(adapt_delta = 0.99,
-                                max_treedepth = 15),
-                 seed = 965336,
-                 file = "model fits/rto - shotsfired calls fit",
-                 file_refit = "on_change",
-                 backend = "cmdstanr")
+                 zi ~ 1 + (1 | intv_area) + (1 | block_id)),
+              data = d_post,
+              family = zero_inflated_negbinomial(),
+              prior = c(prior(normal(0, 1), class = Intercept),
+                        prior(normal(0, 0.1), class = b),
+                        prior(exponential(2), class = sd),
+                        prior(exponential(0.02), class = shape),
+                        prior(lkj(4), class = cor),
+                        prior(logistic(0, 1), class = Intercept, dpar = zi),
+                        prior(exponential(2), class = sd, dpar = zi)),
+              cores = parallel::detectCores(),
+              chains = 4, iter = 4000, warmup = 1000, threads = 2,
+              control = list(adapt_delta = 0.99,
+                             max_treedepth = 15),
+              seed = 337345,
+              file = "zi rto - gun violence fit",
+              file_refit = "on_change",
+              backend = "rstan")
 
-print(rtocfs_fit, digits = 3)
-
-#### Compute Differences in Posteriors ####
+### Compute Differences in Posteriors
 
 library(tidybayes)
 
@@ -605,28 +901,6 @@ rto_gv_fsw = rtogv_fit %>%
 
 ## Differences in Posteriors
 
-gv_fsw = gv_fsw %>%
-  arrange(b_fs_within)
-
-ngv_fsw = ngv_fsw %>%
-  arrange(b_fs_within)
-
-gv_comp = data.frame(
-  gv = gv_fsw$b_fs_within,
-  ngv = ngv_fsw$b_fs_within
-)
-
-rto_comp = data.frame(
-  gv = gv_fsw$b_fs_within,
-  rto = rto_gv_fsw$b_fs_within
-)
-
-hypothesis(gv_comp, "gv = ngv", alpha = 0.05)
-
-hypothesis(rto_comp, "gv = rto", alpha = 0.05)
-
-plot(hypothesis(gv_fsw, "b_fs_within < -0.007", alpha = 0.05))
-
 (gv_fsw$b_fs_within - ngv_fsw$b_fs_within) %>%
   mean_qi(.width = 0.95)
 
@@ -637,149 +911,65 @@ plot(hypothesis(gv_fsw, "b_fs_within < -0.007", alpha = 0.05))
 
 tibble(
   diff = c(gv_fsw$b_fs_within - ngv_fsw$b_fs_within,
-            gv_fsw$b_fs_within - rto_gv_fsw$b_fs_within),
-  outcome = rep(c("Alternate\nDependent\nVariable\nNon-Gun Violence", 
-                  "Reverse\nTime Order\nGun Violence"), each = 12000)
+           gv_fsw$b_fs_within - rto_gv_fsw$b_fs_within),
+  outcome = rep(c("Alternate Dependent Variable\nNon-Gun Violence", 
+                  "Reverse Time Order\nPre-Intervention Gun Violence"), each = 12000)
 ) %>%
-  ggplot(aes(y = outcome, x = diff)) +
+  ggplot(aes(x = diff, fill = after_stat(x < 0))) +
   stat_halfeye(.width = c(0.9, 0.95)) +
   geom_vline(xintercept = 0, linetype = 2) +
   labs(x = expression(atop("Difference in Posterior Distributions", paste("Main Result ", beta[w], " - Comparison ", beta[w]))),
-       y = "Robustness Check Comparison") +
+       y = "Posterior Density") +
+  facet_wrap(~outcome, nrow = 1) +
+  scale_fill_manual(values = c("gray", "deepskyblue"),
+                    guide = "none") +
   theme_classic() +
   theme(text = element_text(color = "black", family = "serif"),
         axis.text = element_text(color = "black", size = 14),
-        axis.title = element_text(size = 16))
+        axis.title = element_text(size = 16),
+        strip.text = element_text(size = 12, face = "bold"))
 
-#### Check with Lagged Seizures ####
+# Figure 3
 
-d_post = d_post %>%
-  group_by(intv_area) %>%
-  mutate(lag_seizures = lag(gun_seizures),
-         fs_between_lag = mean(lag_seizures, na.rm = TRUE)) %>%
-  ungroup() %>%
-  mutate(fs_within_lag = lag_seizures - fs_between_lag)
+ggsave("Placebo Posterior Differences.png", width = 6.5, height = 4, units = "in")
 
-d_post %>%
-  select(time, block_id, gun_seizures, lag_seizures, fs_between_lag, fs_within_lag) %>%
-  head(20)
+#### Stacked and Interaction Version ####
 
-## Gun Violence
+d_post_gv = d_post %>%
+  mutate(outcome = "gun violence",
+         dv = total_gun)
 
-gv_fit_lag = brm(total_gun ~ 
-                   timeZ + I(timeZ^2) + fs_between_lag + fs_within_lag +
-                   tx + traffic_sqmiZ + t.popZ + femhhZ + vacantZ + blackZ + hispanicZ + ml1521Z +
-                   (1 + timeZ + I(timeZ^2) | intv_area) + (1 + timeZ + I(timeZ^2) | block_id),
-                 data = d_post,
-                 family = negbinomial(link = "log"),
-                 prior = c(prior(exponential(0.02), class = shape),
-                           prior(normal(0, 1), class = Intercept),
-                           prior(normal(0, 0.1), class = b),
-                           prior(exponential(2), class = sd),
-                           prior(lkj(4), class = cor)),
-                 cores = parallel::detectCores(),
-                 chains = 4, iter = 4000, warmup = 1000, threads = 2,
-                 control = list(adapt_delta = 0.99,
-                                max_treedepth = 15),
-                 seed = 854332,
-                 file = "model fits/gun violence fit lag",
-                 file_refit = "on_change",
-                 backend = "cmdstanr")
+d_post_ngv = d_post %>%
+  mutate(outcome = "non-gun violence",
+         dv = total_nongun)
 
-#gv_fit_lag = read_rds("model fits/gun violence fit lag.rds")
+d_post_stack = d_post_gv %>%
+  bind_rows(d_post_ngv)
 
-print(gv_fit_lag, digits = 3)
+d_post_stack = d_post_stack %>%
+  mutate(outcome = factor(outcome, levels = c("non-gun violence", "gun violence")))
 
-# Calls for Service - Shots Fired
+stackgv_fit = brm(bf(dv ~ 
+                       outcome*(timeZ + I(timeZ^2) + fs_between + fs_within +
+                       tx + traffic_sqmiZ + t.popZ + femhhZ + vacantZ + blackZ + hispanicZ + ml1521Z) +
+                       (1 + timeZ + I(timeZ^2) | intv_area) + (1 + timeZ + I(timeZ^2) | block_id),
+                     zi ~ 1 + outcome + (1 | intv_area) + (1 | block_id)),
+                  data = d_post_stack,
+                  family = zero_inflated_negbinomial(),
+                  prior = c(prior(normal(0, 1), class = Intercept),
+                            prior(normal(0, 0.1), class = b),
+                            prior(exponential(2), class = sd),
+                            prior(exponential(0.02), class = shape),
+                            prior(lkj(4), class = cor),
+                            prior(logistic(0, 1), class = Intercept, dpar = zi),
+                            prior(exponential(2), class = sd, dpar = zi)),
+                  cores = parallel::detectCores(),
+                  chains = 4, iter = 4000, warmup = 1000, threads = 2,
+                  control = list(adapt_delta = 0.99,
+                                 max_treedepth = 15),
+                  seed = 95197,
+                  file = "model fits/stacked dv check",
+                  file_refit = "on_change",
+                  backend = "rstan")
 
-sf_fit_lag = brm(cfs_shotsfired ~ 
-                   timeZ + I(timeZ^2) + fs_between_lag + fs_within_lag +
-                   tx + traffic_sqmiZ + t.popZ + femhhZ + vacantZ + blackZ + hispanicZ + ml1521Z +
-                   (1 + timeZ + I(timeZ^2) | intv_area) + (1 + timeZ + I(timeZ^2) | block_id),
-                 data = na.omit(d_post),
-                 family = negbinomial(link = "log"),
-                 prior = c(prior(exponential(0.02), class = shape),
-                           prior(normal(0, 1), class = Intercept),
-                           prior(normal(0, 0.1), class = b),
-                           prior(exponential(2), class = sd),
-                           prior(lkj(4), class = cor)),
-                 cores = parallel::detectCores(),
-                 chains = 4, iter = 4000, warmup = 1000, threads = 2,
-                 control = list(adapt_delta = 0.99,
-                                max_treedepth = 15),
-                 seed = 516009,
-                 file = "model fits/shots fired fit lag",
-                 file_refit = "on_change",
-                 backend = "cmdstanr", silent = 0)
-
-print(sf_fit_lag, digits = 3)
-
-#### Cross Check with ML Poisson
-# Warning: These take just as long, if not longer, than the Bayesian
-# negative binomial models
-
-library(sandwich)
-library(clubSandwich)
-library(lmtest)
-
-# Gun Violence
-pois_fit = glm(total_gun ~ gun_seizures + factor(time) + factor(block_id),
-               data = d_post,
-               family = poisson(link = "log"))
-summary(pois_fit)
-coeftest(pois_fit, vcov = vcovCL, cluster = ~ time + intv_area)
-# -0.032 (.009) z = -3.61, p = .0003
-
-# Gun Violence with block trends
-pois_fit2 = glm(total_gun ~ gun_seizures + factor(time) + factor(block_id) +
-                 (factor(block_id)*time),
-               data = d_post,
-               family = poisson(link = "log"))
-summary(pois_fit2)
-coeftest(pois_fit2, vcov = vcovCL, cluster = ~ time + intv_area)
-coefci(pois_fit2, vcov = vcovCL, cluster = ~ time + block_id + intv_area,
-       parm = "gun_seizures")
-# # -0.031 (.008) z = -3.85, p = .0001 [-0.046, -0.015]
-
-# Shots fired
-pois_fit_cfs = glm(cfs_shotsfired ~ gun_seizures + factor(time) + factor(block_id),
-               data = d_post,
-               family = poisson(link = "log"))
-summary(pois_fit_cfs)
-coeftest(pois_fit_cfs, vcov = vcovCL, cluster = ~ time + intv_area)
-# -0.001 (.003) z = -0.266, p = .791
-
-# Shots fired with block trends
-pois_fit_cfs2 = glm(cfs_shotsfired ~ gun_seizures + factor(time) + factor(block_id) +
-                      (factor(block_id)*time),
-                   data = d_post,
-                   family = poisson(link = "log"))
-summary(pois_fit_cfs2)
-coeftest(pois_fit_cfs2, vcov = vcovCL, cluster = ~ time + block_id + intv_area)
-coefci(pois_fit_cfs2, vcov = vcovCL, cluster = ~ time + block_id + intv_area,
-       parm = "gun_seizures")
-# 0.019 (.026) z = .719, p = .472
-
-### Sensitivity of effect of reported gun violence to exclusion of final quarter
-
-gv_fit_no13Q4 = brm(total_gun ~ 
-                      timeZ + I(timeZ^2) + fs_between + fs_within +
-                      tx + traffic_sqmiZ + t.popZ + femhhZ + vacantZ + blackZ + hispanicZ + ml1521Z +
-                      (1 + timeZ + I(timeZ^2) | intv_area) + (1 + timeZ + I(timeZ^2) | block_id),
-                    data = d_post %>% filter(time < 22),
-                    family = negbinomial(link = "log"),
-                    prior = c(prior(exponential(0.02), class = shape),
-                              prior(normal(0, 1), class = Intercept),
-                              prior(normal(0, 0.1), class = b),
-                              prior(exponential(2), class = sd),
-                              prior(lkj(4), class = cor)),
-                    cores = parallel::detectCores(),
-                    chains = 4, iter = 4000, warmup = 1000, threads = 2,
-                    control = list(adapt_delta = 0.99,
-                                   max_treedepth = 15),
-                    seed = 287578,
-                    file = "model fits/gun violence fit no 2013 Q4",
-                    file_refit = "on_change",
-                    backend = "cmdstanr")
-
-print(gv_fit_no13Q4, digits = 3)
+print(stackgv_fit, digits = 3)
